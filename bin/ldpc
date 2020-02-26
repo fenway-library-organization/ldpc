@@ -132,9 +132,16 @@ sub cmd_since {
         )
         GROUP BY bid
     });
+    my $t0 = time;
     $sth->execute($timestamp);
     while (my ($bid, $t) = $sth->fetchrow_array) {
         print join("\t", $bid, $t), "\n";
+    }
+    if (defined $f) {
+        # Update timestamp
+        my $atime = atime($f);
+        utime $atime, $t0, $f
+            or fatal "touch timestamp file $f: $!";
     }
 }
 
@@ -214,6 +221,14 @@ sub subcmd {
     my @caller = caller 1;
     $caller[3] =~ /(cmd_\w+)$/ or die;
     goto &{ __PACKAGE__->can($1.'_'.$subcmd) || usage };
+}
+
+sub atime {
+    # time - (-M $f);
+    my ($f) = @_;
+    my @stat = stat($f);
+    return if !@stat;
+    return $stat[8];
 }
 
 sub mtime {
