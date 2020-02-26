@@ -1,0 +1,310 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use DBI;
+use POSIX qw(strftime);
+use Getopt::Long
+    qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
+
+sub usage;
+sub fatal;
+
+my $root = '/usr/local/folio';
+my %sites;
+my $dbh;
+my $verbose;
+
+usage if @ARGV < 2;
+
+### my %sites = (
+###     'sim' => {
+###         'host' => 'simmons-ldp.folio-dev.indexdata.com',
+###         'port' => 5439,
+###         'dbname' => 'simmons',
+###         'user' => 'ldp',
+###         'password' => 'kzNTiZ5F5hmQuyNJ',
+###     },
+### );
+
+usage if shift(@ARGV) !~ /^[@](.+)$/;
+my $site = $1;
+read_config($site);
+
+&{ __PACKAGE__->can('cmd_'.shift(@ARGV)) or usage };
+$dbh->disconnect if $dbh;
+
+# --- Command handlers
+
+sub cmd_query {
+    my ($print_header);
+    orient(
+        'h|print-header' => \$print_header,
+    );
+    usage if !@ARGV;
+    $dbh = dbh($site);
+    my $sql = shift @ARGV;
+    my $sth = sth($sql);
+    $sth->execute(@ARGV);
+    if ($print_header) {
+        print join("\t", @{ $sth->{'NAME_lc'} }), "\n";
+    }
+    while (my @row = $sth->fetchrow_array) {
+        print join("\t", @row), "\n";
+    }
+}
+
+sub cmd_tables {
+    orient();
+    usage if @ARGV > 1;
+    my $s = @ARGV ? shift @ARGV : undef;
+    $dbh = dbh($site);
+    my $sth = $dbh->table_info(undef, $s, '%', 'TABLE');
+    my $n = 0;
+    while (my $table = $sth->fetchrow_hashref) {
+        $table->{'table_name'} = join('.', @$table{qw(table_schem table_name)})
+            if !defined $s;
+        my $remarks = $table->{'remarks'} ? " -- $table->{'remarks'}" : '';
+        print $table->{'table_name'}, $remarks, "\n";
+    }
+}
+
+sub cmd_table {
+    #@ usage: table [SCHEMA] TABLE
+    orient();
+	usage if @ARGV < 1 || @ARGV > 2;
+    $dbh = dbh($site);
+    my $t = pop @ARGV;
+    my $s = @ARGV ? shift @ARGV : undef;
+    my $sth = $dbh->table_info('', $s, $t, 'TABLE');
+    my $n = 0;
+    while (my $table = $sth->fetchrow_hashref) {
+        print "\n" if ++$n > 1;
+        $table->{'table_name'} = join('.', @$table{qw(table_schem table_name)})
+            if !defined $s;
+        print $table->{'table_name'}, "\n";
+        my $sth_cols = $dbh->column_info(undef, $table->{'table_schem'}, $t, undef);
+        while (my $column = $sth_cols->fetchrow_hashref) {
+            printf "%-32.32s %s\n", @$column{qw(pg_column pg_type)};
+        }
+    }
+}
+
+sub cmd_check {
+    subcmd();
+}
+
+sub cmd_since {
+    my ($f);
+    orient(
+        'f|timestamp-file=s' => \$f,
+    );
+    my $timestamp;
+    if (defined $f) {
+        my $t = mtime($f);
+        $timestamp = strftime('%Y-%m-%d %H:%M:%S.000000+00', gmtime $t);
+        # $timestamp =~ s/\.000000/sprintf ".%06d", int(($t - int $t) * 1_000_000)/e;
+    }
+    elsif (@ARGV == 1) {
+        $timestamp = timestamp(@ARGV);
+    }
+    else {
+        usage;
+    }
+    $dbh = dbh($site);
+    my $sth = sth(q{
+        SELECT bid, max(t) FROM (
+            SELECT  id                   AS bid,
+                    updated              AS t
+            FROM    history.instances
+            WHERE   updated > $1
+            UNION
+            SELECT  h.instance_id        AS bid,
+                    hh.updated           AS t
+            FROM    holdings h INNER JOIN history.holdings hh ON h.id = hh.id
+            WHERE   hh.updated > $1
+            UNION
+            SELECT  h.instance_id        AS bid,
+                    hi.updated           AS t
+            FROM    items i INNER JOIN history.items hi ON i.id = hi.id INNER JOIN holdings h ON i.holdings_record_id = h.id
+            WHERE   hi.updated > $1
+        )
+        GROUP BY bid
+    });
+    $sth->execute($timestamp);
+    while (my ($bid, $t) = $sth->fetchrow_array) {
+        print join("\t", $bid, $t), "\n";
+    }
+}
+
+sub cmd_since_old {
+    usage if @ARGV != 1;
+    my $timestamp = timestamp(@ARGV);
+    $dbh = dbh($site);
+    my $sth = sth(q{
+        SELECT  'b'                  AS rectype,
+                updated              AS t,
+                id                   AS bid,
+                NULL                 AS hid,
+                NULL                 AS iid
+        FROM    history.instances
+        WHERE   updated > $1
+        UNION
+        SELECT  'h'                  AS rectype,
+                hh.updated           AS t,
+                h.instance_id        AS bid,
+                h.id                 AS hid,
+                NULL                 AS iid
+        FROM    holdings h INNER JOIN history.holdings hh ON h.id = hh.id
+        WHERE   hh.updated > $1
+        UNION
+        SELECT  'i'                  AS rectype,
+                hi.updated           AS t,
+                h.instance_id        AS bid,
+                i.holdings_record_id AS hid,
+                i.id                 AS iid
+        FROM    items i INNER JOIN history.items hi ON i.id = hi.id INNER JOIN holdings h ON i.holdings_record_id = h.id
+        WHERE   hi.updated > $1
+        ORDER   BY bid, hid, iid
+    });
+    $sth->execute($timestamp);
+    while (my ($rectype, $t, @ids) = $sth->fetchrow_array) {
+        print join("\t", map { defined $_ ? $_ : '' } $rectype, @ids), "\n";
+    }
+}
+
+sub cmd_check_init {
+    # Initialize checkpointing
+    orient();
+    $dbh = dbh($site);
+    my @sql = (
+        q{
+            CREATE TABLE IF NOT EXISTS local.checkpoints (
+                id          SERIAL,
+                began       TIMESTAMP WITH TIMEZONE,
+                ended       TIMESTAMP WITH TIMEZONE,
+                flipflop    INTEGER DEFAULT 0,
+                CHECK (flipflop IN (0, 1))
+            )
+        },
+        q{
+            CREATE TABLE IF NOT EXISTS local.instances (
+                id          VARCHAR(65535),
+                createdIn   INTEGER FOREIGN KEY REFERENCES local.checkpoints(id),
+                updatedIn   INTEGER FOREIGN KEY REFERENCES local.checkpoints(id),
+                deletedIn   INTEGER FOREIGN KEY REFERENCES local.checkpoints(id),
+                digest      VARCHAR(64),
+                flipflop    INTEGER DEFAULT 0,
+                CHECK (flipflop IN (0, 1))
+            )
+        },
+    );
+    foreach my $sql (@sql) {
+        my $sth = sth($sql);
+        $sth->execute;
+    }
+}
+
+# --- Other functions
+
+sub subcmd {
+    usage if !@ARGV;
+    my $subcmd = shift @ARGV;
+    my @caller = caller 1;
+    $caller[3] =~ /(cmd_\w+)$/ or die;
+    goto &{ __PACKAGE__->can($1.'_'.$subcmd) || usage };
+}
+
+sub mtime {
+    # time - (-M $f);
+    my ($f) = @_;
+    my @stat = stat($f);
+    return if !@stat;
+    return $stat[9];
+}
+
+sub timestamp {
+    my ($t) = @_;
+    my ($y, $m, $d, $H, $M, $S, $u, $tzsign, $tz) = (undef, undef, undef, 0, 0, 0, 0, '+', 0);
+    return if $t !~ s/^([0-9]{4})-?([0-9]{2})-?([0-9]{2})//;
+    ($y, $m, $d) = ($1, $2, $3);
+    if ($t =~ s/^[T ]?([0-9]{2}):?([0-9]{2})//) {
+        ($H, $M) = ($1, $2);
+        if ($t =~ s/^:?([0-9]{2})//) {
+            $S = $1;
+            if ($t =~ s/^\.([0-9]{6})//) {
+                $u = $1;
+            }
+        }
+    }
+    if ($t =~ s/^([-+])([0-9]{2})//) {
+        ($tzsign, $tz) = ($1, $2);
+    }
+    elsif ($t !~ s/^Z?$//) {
+        return;
+    }
+    return sprintf('%04d-%02d-%02d %02d:%02d:%02d.%06d%s%02d', $y, $m, $d, $H, $M, $S, $u, $tzsign, $tz);
+}
+
+sub dbh {
+    my ($site) = @_;
+    $sites{$site} or fatal "no such site: $site";
+    my %db = %{ $sites{$site} };
+    my %opt = qw(
+        AutoCommit       0
+        RaiseError       1
+    );
+    my $dbh = DBI->connect("dbi:Pg:dbname=$db{'dbname'};host=$db{'host'};port=$db{'port'}", $db{'user'}, $db{'password'}, \%opt);
+    $dbh->{'FetchHashKeyName'} = 'NAME_lc';
+    # TODO -- error checking
+    return $dbh;
+}
+
+sub sth {
+    my ($sql) = @_;
+    my $sth = $dbh->prepare($sql);
+    return $sth;
+}
+
+sub read_config {
+    my ($s) = @_;
+    my %config;
+    my $f = "$root/site/$s/ldp.conf";
+    open my $fh, '<', $f or fatal "open $f: $!";
+    while (<$fh>) {
+        next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
+        chomp;
+        /^\s*(\S+)\s*=\s*(.*)$/
+            or fatal "bad config setting at line $. of $f: $_";
+        my ($k, $v) = (camelize(trim($1)), trim($2));
+        $config{$k} = $v;
+    }
+    $sites{$s} = \%config;
+}
+
+sub trim {
+    local $_ = shift;
+    s/^\s+|\s+$//g;
+    return $_;
+}
+
+sub norm {
+    local $_ = trim(shift);
+    s/\s+/ /g;
+    return $_;
+}
+
+sub camelize {
+    local $_ = shift;
+    s/\s+(.)/\U$1/g;
+    return $_;
+}
+
+sub orient {
+    GetOptions(
+        'v|verbose' => \$verbose,
+        @_,
+    ) or usage;
+}
+
