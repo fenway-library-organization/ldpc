@@ -270,7 +270,19 @@ sub dbh {
         AutoCommit       0
         RaiseError       1
     );
-    my $dbh = DBI->connect("dbi:Pg:dbname=$db{'dbname'};host=$db{'host'};port=$db{'port'}", $db{'user'}, $db{'password'}, \%opt);
+    my @req_args = qw(dbname host port);
+    my @opt_args = qw(options service sslmode);
+    my @args;
+    foreach my $k (@req_args) {
+        my $v = $db{$k} // fatal "required database connection parameter not configured: $k";
+        push @args, $k . '=' . $v;
+    }
+    foreach my $k (@opt_args) {
+        my $v = $db{$k} // next;
+        push @args, $k . '=' . $v;
+    }
+    my $connstr = 'dbi:Pg:' . join(';', @args);
+    my $dbh = DBI->connect($connstr, $db{'user'}, $db{'password'}, \%opt);
     $dbh->{'FetchHashKeyName'} = 'NAME_lc';
     # TODO -- error checking
     return $dbh;
