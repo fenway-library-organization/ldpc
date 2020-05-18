@@ -9,7 +9,10 @@ build: config.mk
 config.mk: config.mk.def
 	cp $< $@
 
-install:
+install: check
 	./install $(PREFIX)
 
-.PHONY: build install
+check:
+	@for f in bin/ldpc $(shell find lib -name \*.pm); do perl -Ilib -I$(PREFIX)/lib -c $$f; done
+
+.PHONY: build install check
