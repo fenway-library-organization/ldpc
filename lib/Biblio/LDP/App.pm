@@ -64,7 +64,7 @@ sub cmd_query {
     $self->usage if !@$argv;
     my $sql = shift @$argv;
     my $site = $self->site;
-    my $sth = $site->sth($sql);
+    my $sth = $site->query($sql);
     $sth->execute(@$argv);
     if ($print_header) {
         print join("\t", @{ $sth->{'NAME_lc'} }), "\n";
@@ -137,7 +137,7 @@ sub cmd_since {
         $self->usage;
     }
     my $site = $self->site;
-    my $sth = $site->sth(q{
+    my $sth = $site->query(q{
         SELECT bid, max(t) FROM (
             SELECT  id                   AS bid,
                     updated              AS t
@@ -175,7 +175,7 @@ sub cmd_since_old {
     $self->usage if @$argv != 1;
     my $timestamp = timestamp(@$argv);
     my $site = $self->site;
-    my $sth = $site->sth(q{
+    my $sth = $site->query(q{
         SELECT  'b'                  AS rectype,
                 updated              AS t,
                 id                   AS bid,
@@ -235,7 +235,7 @@ sub cmd_check_init {
     );
     my $site = $self->site;
     foreach my $sql (@sql) {
-        my $sth = $site->sth($sql);
+        my $sth = $site->query($sql);
         $sth->execute;
     }
 }
