@@ -151,17 +151,17 @@ sub fresh {
         SELECT bid, max(t) FROM (
             SELECT  id                   AS bid,
                     updated              AS t
-            FROM    history.instances
+            FROM    history.inventory_instances
             WHERE   updated > $1
             UNION
             SELECT  h.instance_id        AS bid,
                     hh.updated           AS t
-            FROM    holdings h INNER JOIN history.holdings hh ON h.id = hh.id
+            FROM    inventory_holdings h INNER JOIN history.inventory_holdings hh ON h.id = hh.id
             WHERE   hh.updated > $1
             UNION
             SELECT  h.instance_id        AS bid,
                     hi.updated           AS t
-            FROM    items i INNER JOIN history.items hi ON i.id = hi.id INNER JOIN holdings h ON i.holdings_record_id = h.id
+            FROM    inventory_items i INNER JOIN history.inventory_items hi ON i.id = hi.id INNER JOIN inventory_holdings h ON i.holdings_record_id = h.id
             WHERE   hi.updated > $1
         )
         GROUP BY bid
@@ -199,13 +199,13 @@ sub mtime {
 }
 
 sub timestamp {
-    my ($t) = @_;
+    my $t = pop;  # Allow for $ts = $ldp->timestamp(...) as well as just $ts = timestamp(...)
     return if !defined $t;
     my ($Y, $m, $d, $H, $M, $S, $u, $tzsign, $tz) = (undef, undef, undef, 0, 0, 0, 0, '+', 0);
     if ($t =~ /^[0-9]+$/) {
         ($S, $M, $H, $d, $m, $Y) = gmtime $t;
         $Y += 1900;
-        $d++;
+        $m++;
     }
     else {
         return if $t !~ s/^([0-9]{4})-?([0-9]{2})-?([0-9]{2})//;
