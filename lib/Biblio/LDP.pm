@@ -20,6 +20,7 @@ sub config { @_ > 1 ? $_[0]{'config'} = $_[1] : $_[0]{'config'} }
 sub init {
     my ($self) = @_;
     $self->read_config;
+    $self->{'sth'} = {};
     return $self;
 }
 
@@ -31,9 +32,14 @@ sub DESTROY {
 
 # --- Command handlers
 
+sub sth {
+    my ($self, $sql) = @_;
+    return $self->{'sth'}{$sql} ||= $self->dbh->prepare($sql);
+}
+
 sub query {
     my ($self, $sql, @params) = @_;
-    my $sth = $self->dbh->prepare($sql);
+    my $sth = $self->sth($sql);
     $sth->execute(@params);
     return $sth if !wantarray;
     return $sth, $sth->{'NAME_lc'}, sub {
@@ -202,8 +208,9 @@ sub timestamp {
     my $t = pop;  # Allow for $ts = $ldp->timestamp(...) as well as just $ts = timestamp(...)
     return if !defined $t;
     my ($Y, $m, $d, $H, $M, $S, $u, $tzsign, $tz) = (undef, undef, undef, 0, 0, 0, 0, '+', 0);
-    if ($t =~ /^[0-9]+$/) {
-        ($S, $M, $H, $d, $m, $Y) = gmtime $t;
+    if ($t =~ /^([0-9]+)(?:(\.[0-9]+))?$/) {
+        ($S, $M, $H, $d, $m, $Y) = gmtime $1;
+        $u = microseconds($2) if defined $2;
         $Y += 1900;
         $m++;
     }
@@ -227,6 +234,13 @@ sub timestamp {
         }
     }
     return sprintf('%04d-%02d-%02d %02d:%02d:%02d.%06d%s%02d', $Y, $m, $d, $H, $M, $S, $u, $tzsign, $tz);
+}
+
+sub microseconds {
+    my ($n) = @_;
+    my $us = sprintf '%.6f', $n - int($n);
+    $us =~ s/.*\.//;
+    return $us;
 }
 
 sub dbh {
@@ -253,6 +267,23 @@ sub dbh {
     $dbh->{'FetchHashKeyName'} = 'NAME_lc';
     # TODO -- error checking
     return $self->{'dbh'} = $dbh;
+}
+
+sub ping {
+    my ($self) = @_;
+    my $rv = $self->pg_ping;
+    return 1 if $rv > 0;
+    my @messages = (
+       'PQstatus returned a CONNECTION_BAD',
+       'the test query failed (PQexec returned null)',
+       'an unknown transaction status was returned',
+       'there is no connection to the database',
+    );
+    my $msg = $messages[$rv] || 'unknown error';
+    delete $self->{'dbh'};
+    my $dbh = eval { $self->dbh }
+        or die "LDP database handle is dead: $msg";
+    return 1;
 }
 
 sub read_config {
